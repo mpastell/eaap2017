@@ -1,0 +1,142 @@
+---
+title: The effect of sample size on the accuracy of machine learning models in precision
+  livestock farming
+author: "Matti Pastell, Natural Resources Institute Finland (Luke)"
+output:
+  html_document: default
+  html_notebook: default
+---
+
+# Intro
+
+The sample size and and label noise both have an effect on the performance of machine learning models. Such models are frequently used in Precision Livestock Farming (PLF) applications to develop methods to e.g. predict the health status of an animal. The aim of this study was to evaluate the effect of sample size and label quality in the confidence of achieved model accuracy. 
+
+This notebook contains the code for running the simulations of an abstract submitted to the EAAP 2017 conference. 
+
+```{r, include=FALSE}
+knitr::opts_chunk$set(comment=NA, warning = FALSE, message= FALSE)
+```
+
+```{r}
+#Import depencies
+library(MASS)
+library(dplyr)
+library(e1071)
+library(LiblineaR)
+library(ggplot2)
+```
+
+# Methods
+
+Models were fitted repeatedly to a simulated datasets with two classes. N samples (50%/class) were drawn from two multivariate gaussian distributions representing 2 features for 2 different classes, the means of the distributions were (1,1) an (2,2) with diag(0.5, 0.5) covariance. 
+
+Three classifiers (logistic regression (LR), linear support vector machine (SVM), SVM with radial basis kernel) were fitted to the training set. The accuracy of the classifiers was evaluated using independent validation set from same distribution. Simulation was repeated (N=1000) from 20 to 2000 samples with label noise probabilities from 0 to 0.4 (code: 
+
+# Functions for running the simulation
+
+`make_labels` function creates labels for simulated data and flips the label with a probability set by pnoise.
+
+
+```{r}
+make_labels <- function(nsample, pnoise = 0)
+{
+  l1 <- rep(1, nsample)
+  l2 <- rep(2, nsample)
+  
+  #Flip labels with noise propability
+  if (pnoise > 0) {
+    l1[sample.int(nsample, pnoise*nsample)] <- 2
+    l2[sample.int(nsample, pnoise*nsample)] <- 1
+  }
+  
+  factor(c(l1, l2))
+}
+```
+
+`create_sample` function creates a sample from the two distributions with `nsample`s from both distributions with their labels, optionally corrupted by noise set by `pnoise` parameter.
+
+```{r}
+create_sample <- function(nsample, pnoise = 0){
+
+  cls1 <- mvrnorm(nsample, c(1, 1), matrix(c(.5,0,0,.5),2,2))
+  cls2 <- mvrnorm(nsample, c(2, 2), matrix(c(.5,0,0,.5),2,2))
+  label <- make_labels(nsample, pnoise)
+  df <- data.frame(rbind2(cls1, cls2), label)
+  names(df) <- c("feature1", "feature2", "label")
+  df
+}
+```
+
+`test_accuracy` 
+
+```{r}
+test_accuracy <- function(nsample, pnoise = 0){
+  train <- create_sample(nsample, pnoise)
+  test <- create_sample(nsample, pnoise)
+  bigtest <- create_sample(1e4, pnoise = 0)
+  
+  #RBF svm
+  mod_svm <- svm(label ~ ., data = train)
+  plab <- predict(mod_svm, newdata = test)
+  acc_svm <- mean(test$label == plab)
+  bigplab <- predict(mod_svm, newdata = bigtest)
+  bigacc_svm <- mean(bigtest$label == bigplab)
+  
+  #Linear SVM
+  mod_svm <- svm(label ~ ., data = train, kernel = "linear")
+  plab <- predict(mod_svm, newdata = test)
+  acc_linsvm <- mean(test$label == plab)
+  bigplab <- predict(mod_svm, newdata = bigtest)
+  bigacc_linsvm <- mean(bigtest$label == bigplab)
+  
+  #L1-regularized logistic regression using liblinear
+  mod_lr <- LiblineaR(train[,1:2], train$label, type = 6, epsilon=1e-3) 
+  plab <- predict(mod_lr, test[,1:2])$predictions
+  acc_lr <- mean(test$label == plab)
+  bigplab <- predict(mod_lr, bigtest[,1:2])$predictions
+  bigacc_lr <- mean(bigtest$label == bigplab)
+  
+  df <- data.frame(nsample, pnoise, 
+                   acc_svm, bigacc_svm,
+                   acc_linsvm, bigacc_linsvm,
+                   acc_lr, bigacc_lr)
+  return(df)
+}
+```
+
+# Actual simulation
+
+The code below first creates a vector `test_vec` with different class sizes repeated by 1000 times each and applies the `test_vec` function in parallel (controlled by `ncores`, Windows you need to use 1) to the generated vector resulting in 1000 separately trained and validated models for each each sample size. The simulation takes quite long to run (~1h using 8 cores on my Linux server) so it also saves the results for further inspection.  
+
+```{r}
+test_vec <- c()
+for (n in c(10, 20, 30, 40, 50, 100, 500, 1000))
+{
+  test_vec <- c(test_vec, rep(n, 1000))
+}
+
+library(parallel)
+ncores <- 12
+results <- bind_rows(mclapply(test_vec, test_accuracy, mc.cores = ncores),
+                      mclapply(test_vec, test_accuracy, .1, mc.cores = ncores),
+                     mclapply(test_vec, test_accuracy, .2, mc.cores = ncores),
+                     mclapply(test_vec, test_accuracy, .3, mc.cores = ncores),
+                     mclapply(test_vec, test_accuracy, .4, mc.cores = ncores)
+                   )
+save(file="simulation_results.rda", results)
+```
+
+Plot the results for linear SVM as boxplot grouped by sample size and noise probability. Lesser deviation in the simulated prediction accuracy indicates that the sample size is large enough to more reliably train the classifier for different random samples from a distribution.
+
+```{r}
+ggplot(results, aes(x=factor(nsample), y = acc_linsvm, 
+                    color = factor(pnoise))) + geom_boxplot()
+```
+
+# Results and Conclusions
+
+The case presented here is a simple case with 2 features where linear and non-linear classifiers have equal performance. Using more features requires a greater number of samples. This code can be modified for different classifiers and different simulated distributions to estimate required sample size for different applications. It is important to run the simulation with realistic samples and the correct number of features to get relevant results for different applications. 
+
+The classification accuracy (median±95% CI) obtained from simulations (linear SVM) with sample sizes 40, 100, 2000 with no label noise were 82.5±12%, 84±7%, 84.1±1.6% and with 20% label noise propability 70%±12, 70%±7, 70%±1.5%. Classifiers trained on very noisy data  still achieved high classification accuracy when validated against a validation set of 20000 samples with 100% correct labels e.g. a linear SVM achieved 83.7%±1.5% accuracy when trained on 20 000 point sample data with 40% flipped labels.
+
+The results show that there can be a large difference between the results obtained from random sample as compared to the results on unseen samples from the same distribution and that the accuracy of labeling is crucial for research farm scale datasets. It is often costly to collect large amounts of data to develop models for PLF applications. However, the effect of sample size should be taken into account in study designs and when considering the generalization ability of models developed on limited amount of input data. It is possible to fit accurate classifiers with noisy input data, but the perfomance needs to be validated against a good golden standard.
